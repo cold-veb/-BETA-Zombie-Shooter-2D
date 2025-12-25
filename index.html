@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Zombie Shooter</title>
+<style>
+html, body {margin:0;padding:0;overflow:hidden;background:black;font-family:Arial;color:white;}
+canvas {display:block;background:#2a2a2a;}
+.menu,.gameover,.battlepass,.shop {position:fixed;inset:0;background:#0044cc;display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:10;}
+.hidden {display:none;}
+button {padding:14px 22px;margin:10px;font-size:18px;border:none;border-radius:10px;}
+.task {margin:10px;text-align:center;}
+.balance {position:absolute;top:15px;right:20px;font-size:20px;}
+.stats {margin-top:10px;font-size:18px;}
+</style>
+</head>
+<body>
+
+<!-- МЕНЮ -->
+<div id="menu" class="menu">
+  <div class="balance" id="menuCoins">💰 0</div>
+  <h1>🧟 Zombie Shooter</h1>
+  <button onclick="startGame()">▶ Играть</button>
+  <button onclick="openBattlePass()">🎟 Battle Pass</button>
+  <button onclick="openShop()">🛒 Магазин</button>
+  <div class="stats" id="menuStats"></div>
+</div>
+
+<!-- BATTLE PASS -->
+<div id="battlepass" class="battlepass hidden">
+  <h1>🎟 Battle Pass</h1>
+  <div class="task">
+    <div style="color:lightgreen">Просто</div>
+    <div>Убить 50 зомби</div>
+    <div id="task1"></div>
+  </div>
+  <div class="task">
+    <div style="color:yellow">Средне</div>
+    <div>Убить 200 зомби</div>
+    <div id="task2"></div>
+  </div>
+  <div class="task">
+    <div style="color:red">Тяжело</div>
+    <div>Убить 1000 зомби<br>и поиграть 10 минут</div>
+    <div id="task3"></div>
+  </div>
+  <button onclick="claimRewards()">💰 Получить награду</button>
+  <button onclick="openMenu()">⬅ Назад</button>
+</div>
+
+<!-- МАГАЗИН -->
+<div id="shop" class="shop hidden">
+  <h1>🛒 Магазин</h1>
+  <div id="shopItems"></div>
+  <button onclick="openMenu()">⬅ Назад</button>
+</div>
+
+<!-- GAME OVER -->
+<div id="gameover" class="gameover hidden">
+  <h1>Игра окончена</h1>
+  <button onclick="startGame()">🔁 Играть снова</button>
+  <button onclick="openMenu()">📋 Меню</button>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+function resize(){canvas.width=innerWidth;canvas.height=innerHeight;}
+resize();addEventListener("resize",resize);
+
+/* ====== ПЕРЕМЕННЫЕ ====== */
+let state="menu",zombies=[],bullets=[],kills=0;
+let totalKills=Number(localStorage.getItem("totalKills"))||0;
+let bestRecord=Number(localStorage.getItem("bestRecord"))||0;
+let totalTime=Number(localStorage.getItem("totalTime"))||0;
+let coins=Number(localStorage.getItem("coins"))||0;
+let reward1=localStorage.getItem("reward1")==="true";
+let reward2=localStorage.getItem("reward2")==="true";
+let reward3=localStorage.getItem("reward3")==="true";
+let fenceHP=500;
+let killsForCoin=0;
+
+let wave=1,maxWaves=5,waveTime=20,waveTimer=20,wavePause=false,pauseTimer=0;
+let spawnRate=0.02,zombieSpeed=1.2;
+let lastTime=Date.now();
+
+/* ====== ОРУЖИЕ ====== */
+let weapons = {
+  "Pistol": {delay:0.8, bullets:1, price:0, owned:true},
+  "Tek-9": {delay:1, bullets:2, price:200, owned:false},
+  "Shotgun": {delay:0.4, bullets:3, spread:true, price:350, owned:false}, // дробовик: 0.4 сек, 3 пули
+  "UMP": {delay:0.5, bullets:3, spread:true, burst:3, burstDelay:200, price:1000, owned:false}, // UMP: 1000 монет
+  "MachineGun": {delay:0.1, bullets:5, spread:true, price:1500, owned:false}
+};
+let currentWeapon = "Pistol";
+let lastShot = 0;
+let autoFireQueue = []; // очередь для стрельбы очередью (UMP)
+
+/* ====== ЗАГРУЗКА ПРОГРЕССА ====== */
+function loadPersistentProgress() {
+    coins = Number(localStorage.getItem("coins")) || 0;
+    bestRecord = Number(localStorage.getItem("bestRecord")) || 0;
+    totalKills = Number(localStorage.getItem("totalKills")) || 0;
+    totalTime = Number(localStorage.getItem("totalTime")) || 0;
+    reward1 = localStorage.getItem("reward1")==="true";
+    reward2 = localStorage.getItem("reward2")==="true";
+    reward3 = localStorage.getItem("reward3")==="true";
+
+    const storedWeapons = JSON.parse(localStorage.getItem("weapons") || "{}");
+    for(let w in storedWeapons){ if(weapons[w]) weapons[w].owned = storedWeapons[w]; }
+}
+
+/* ====== СОХРАНЕНИЕ ПРОГРЕССА ====== */
+function savePersistentProgress() {
+    localStorage.setItem("coins", coins);
+    localStorage.setItem("bestRecord", bestRecord);
+    localStorage.setItem("totalKills", totalKills);
+    localStorage.setItem("totalTime", Math.floor(totalTime));
+    localStorage.setItem("reward1", reward1);
+    localStorage.setItem("reward2", reward2);
+    localStorage.setItem("reward3", reward3);
+
+    let ownedWeapons = {};
+    for(let w in weapons){ ownedWeapons[w] = weapons[w].owned; }
+    localStorage.setItem("weapons", JSON.stringify(ownedWeapons));
+}
+
+/* ====== ВВОД ====== */
+canvas.addEventListener("touchstart", e=>{
+    if(state!=="game") return;
+    const t = e.touches[0];
+    let now = Date.now();
+    let weapon = weapons[currentWeapon];
+
+    if(currentWeapon === "UMP"){
+        for(let i=0;i<weapon.burst;i++){
+            autoFireQueue.push({x: t.clientX, y: canvas.height-90, bullets: weapon.bullets, time: now + i*weapon.burstDelay});
+        }
+    } else {
+        if(now - lastShot < weapon.delay*1000) return;
+        lastShot = now;
+        if(weapon.bullets === 1){
+            bullets.push({x:t.clientX, y:canvas.height-90});
+        } else {
+            for(let i=0;i<weapon.bullets;i++){
+                let offset = weapon.spread ? (i-((weapon.bullets-1)/2))*12 : 0;
+                bullets.push({x:t.clientX+offset, y:canvas.height-90});
+            }
+        }
+    }
+});
+
+/* ====== МЕНЮ ====== */
+function startGame(){
+    state="game";zombies=[];bullets=[];kills=0;fenceHP=500;
+    wave=1;waveTimer=waveTime;wavePause=false;pauseTimer=0;
+    spawnRate=0.02;zombieSpeed=1.2;killsForCoin=0;
+    hideAll();
+}
+function openMenu(){
+    savePersistentProgress();
+    state="menu";updateMenuCoins();updateMenuStats();hideAll();
+    menu.classList.remove("hidden");
+}
+function openBattlePass(){updateTasks();hideAll();battlepass.classList.remove("hidden");}
+function openShop(){
+    hideAll(); shop.classList.remove("hidden");
+    let html="";
+    for(let w in weapons){
+        const weap = weapons[w];
+        html += `<div style="margin:10px">
+            <b>${w}</b> - Цена: ${weap.price} 💰<br>
+            <button onclick="buyEquip('${w}')">${weap.owned?'Экипировать':'Купить'}</button>
+        </div>`;
+    }
+    document.getElementById("shopItems").innerHTML = html;
+}
+function buyEquip(name){
+    const weap = weapons[name];
+    if(!weap.owned){
+        if(coins >= weap.price){coins -= weap.price; weap.owned=true; updateMenuCoins();}
+        else{alert("Недостаточно монет!"); return;}
+    }
+    currentWeapon=name;
+    openShop();
+}
+
+function hideAll(){
+    menu.classList.add("hidden");
+    battlepass.classList.add("hidden");
+    gameover.classList.add("hidden");
+    shop.classList.add("hidden");
+}
+function updateMenuCoins(){document.getElementById("menuCoins").innerText="💰 "+coins;}
+function updateMenuStats(){document.getElementById("menuStats").innerText=`Best Record: ${bestRecord}\nПоследняя игра: ${kills} убийств`;}
+
+/* ====== ЗОМБИ ====== */
+function spawnZombie(){zombies.push({x:Math.random()*(canvas.width-40),y:-40});}
+
+/* ====== ЛОГИКА ====== */
+function update(){
+    if(state!=="game") return;
+    const now=Date.now();const delta=(now-lastTime)/1000;lastTime=now;
+    totalTime+=delta;
+
+    if(!wavePause){waveTimer-=delta;if(Math.random()<spawnRate) spawnZombie();}
+    else{pauseTimer-=delta;if(pauseTimer<=0){wavePause=false;waveTimer=waveTime;}}
+
+    if(waveTimer<=0&&!wavePause){wavePause=true;pauseTimer=3;wave++;spawnRate+=0.01;zombieSpeed+=0.3;if(wave>maxWaves) endGame();}
+
+    bullets.forEach(b=>b.y-=12);
+
+    zombies.forEach(z=>{
+        z.y+=zombieSpeed;
+        if(z.y>canvas.height-60){fenceHP-=35;z.y=9999;}
+    });
+
+    // Обработка очереди выстрелов (UMP)
+    let nowMs = Date.now();
+    autoFireQueue = autoFireQueue.filter(fire=>{
+        if(nowMs >= fire.time){
+            for(let i=0;i<fire.bullets;i++){
+                let offset = (i-(fire.bullets-1)/2)*12; // разброс
+                bullets.push({x:fire.x+offset, y:fire.y, flash:5});
+            }
+            return false;
+        }
+        return true;
+    });
+
+    bullets.forEach(b=>{
+        zombies.forEach(z=>{
+            if(b.x>z.x && b.x<z.x+35 && b.y>z.y && b.y<z.y+35){
+                z.y=9999; b.y=-100; kills++; totalKills++;
+
+                // Монеты за убийства
+                killsForCoin++;
+                if(killsForCoin >= 2){
+                    coins +=1; killsForCoin=0; updateMenuCoins();
+                }
+            }
+        });
+    });
+
+    zombies=zombies.filter(z=>z.y<canvas.height); bullets=bullets.filter(b=>b.y>0);
+    if(fenceHP<=0) endGame();
+}
+
+function endGame(){
+    state="over";
+    if(kills>bestRecord) bestRecord=kills;
+    savePersistentProgress();
+    hideAll();gameover.classList.remove("hidden");
+}
+
+/* ====== ЗАДАНИЯ ====== */
+function updateTasks(){
+    task1.innerText=reward1?"✔ Получено":`${Math.min(totalKills,50)} / 50`;
+    task2.innerText=reward2?"✔ Получено":`${Math.min(totalKills,200)} / 200`;
+    task3.innerText=reward3?"✔ Получено":`${Math.min(totalKills,1000)} / 1000 | ${Math.min(Math.floor(totalTime),600)} / 600 сек`;
+}
+function claimRewards(){
+    if(!reward1&&totalKills>=50){coins+=50;reward1=true;localStorage.setItem("reward1","true");}
+    if(!reward2&&totalKills>=200){coins+=200;reward2=true;localStorage.setItem("reward2","true");}
+    if(!reward3&&totalKills>=1000&&totalTime>=600){coins+=500;reward3=true;localStorage.setItem("reward3","true");}
+    localStorage.setItem("coins",coins);updateTasks();updateMenuCoins();
+}
+
+/* ====== ОТРИСОВКА ====== */
+function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(state!=="game") return;
+
+    ctx.fillStyle="#444";ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle="brown";ctx.fillRect(0,canvas.height-50,canvas.width,50);
+
+    ctx.fillStyle="white";ctx.font="20px Arial";
+    if(wavePause){ctx.font="32px Arial";ctx.fillText("Следующая волна!",canvas.width/2-120,canvas.height/2);}
+    else{ctx.fillText(`🌊 ${wave} волна: ${Math.ceil(waveTimer)} сек`,10,30);}
+    ctx.fillText(`🧱 ${fenceHP}`,10,60);
+    ctx.fillText(`💀 Убито: ${kills}`,10,90);
+    ctx.fillText(`💰 Монеты: ${coins}`,10,120);
+
+    ctx.fillStyle="yellow";
+    bullets.forEach(b=>{
+        ctx.fillRect(b.x-3,b.y,6,12);
+        if(b.flash && b.flash>0){
+            ctx.fillStyle="orange";
+            ctx.fillRect(b.x-6,b.y-6,12,12);
+            b.flash--;
+            ctx.fillStyle="yellow";
+        }
+    });
+
+    ctx.fillStyle="green";zombies.forEach(z=>ctx.fillRect(z.x,z.y,35,35));
+
+    ctx.fillStyle="#0066ff";ctx.fillRect(canvas.width-90,10,80,35);
+    ctx.fillStyle="white";ctx.fillText("Меню",canvas.width-70,35);
+}
+
+canvas.addEventListener("click", e=>{
+    if(e.clientX>canvas.width-90&&e.clientX<canvas.width-10&&e.clientY>10&&e.clientY<45) openMenu();
+});
+
+function loop(){update();draw();requestAnimationFrame(loop);}
+loop();
+loadPersistentProgress();
+updateMenuCoins();
+updateMenuStats();
+
+// Сохраняем прогресс при закрытии вкладки
+window.addEventListener("beforeunload", savePersistentProgress);
+</script>
+</body>
+</html>
